@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.0.3 — 2026-03-17
+
+### Added
+
+- `GuardianClientConfig::api_token` — optional field to supply the IDUN Cloud API
+  token directly without relying on the `IDUN_API_TOKEN` environment variable
+- `CloudDecoder::from_config` — creates a `CloudDecoder` from a
+  `GuardianClientConfig`, preferring the inline token and falling back to the
+  env var when the field is `None`
+- New tests in `client_config_tests.rs`: `api_token_default_is_none`,
+  extended `custom_config` asserting roundtrip of the `api_token` field
+
+---
+
 ## v0.0.2 — 2026-03-17
 
 ### Changed
