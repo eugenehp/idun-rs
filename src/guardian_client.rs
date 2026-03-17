@@ -151,6 +151,10 @@ pub struct GuardianClientConfig {
     /// Match devices whose advertised name starts with this string.
     /// Default: `"IGE"`.
     pub name_prefix: String,
+    /// IDUN Cloud API token used to create a [`crate::cloud::CloudDecoder`]
+    /// without reading from an environment variable.
+    /// `None` (the default) falls back to the `IDUN_API_TOKEN` env var.
+    pub api_token: Option<String>,
 }
 
 impl Default for GuardianClientConfig {
@@ -159,6 +163,7 @@ impl Default for GuardianClientConfig {
             mains_freq_60hz: false,
             scan_timeout_secs: 15,
             name_prefix: DEVICE_NAME_PREFIX.into(),
+            api_token: None,
         }
     }
 }

@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
         mains_freq_60hz: mains_60hz,
         scan_timeout_secs: timeout,
         name_prefix: "IGE".into(),
+        api_token: None,
     };
 
     // ── Connect to Guardian earbud ────────────────────────────────────────

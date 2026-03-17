@@ -742,7 +742,7 @@ async fn main() -> Result<()> {
     let mut pending_scan: Option<oneshot::Receiver<ScanResult>> = None;
     let mut pending_connect: Option<oneshot::Receiver<Option<ConnectOutcome>>> = None;
     let mut retry_at: Option<tokio::time::Instant> = None;
-    let scan_cfg = GuardianClientConfig { mains_freq_60hz: mains_60hz, scan_timeout_secs: 5, name_prefix: "IGE".into() };
+    let scan_cfg = GuardianClientConfig { mains_freq_60hz: mains_60hz, scan_timeout_secs: 5, name_prefix: "IGE".into(), api_token: None };
 
     if simulate {
         let mut s = app.lock().unwrap();

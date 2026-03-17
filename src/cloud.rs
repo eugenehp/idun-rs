@@ -110,6 +110,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Result};
 use base64::Engine;
+
+use crate::guardian_client::GuardianClientConfig;
 use futures::{SinkExt, StreamExt};
 use log::{debug, error, info, warn};
 use serde_json::{json, Value};
@@ -201,6 +203,17 @@ impl CloudDecoder {
             .map_err(|_| anyhow!("IDUN_API_TOKEN environment variable not set. \
                 Set it with: export IDUN_API_TOKEN=your-token"))?;
         Ok(Self::new(token, device_id))
+    }
+
+    /// Create a cloud decoder from a [`GuardianClientConfig`].
+    ///
+    /// Uses `config.api_token` when set; otherwise falls back to
+    /// the `IDUN_API_TOKEN` environment variable via [`Self::from_env`].
+    pub fn from_config(config: &GuardianClientConfig, device_id: String) -> Result<Self> {
+        match &config.api_token {
+            Some(token) => Ok(Self::new(token.clone(), device_id)),
+            None => Self::from_env(device_id),
+        }
     }
 
     /// Connect to the IDUN Cloud WebSocket and start a recording session.
