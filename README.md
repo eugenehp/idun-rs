@@ -1,4 +1,4 @@
-# idun-rs
+# idun
 
 A Rust library, CLI, and terminal UI for streaming real-time EEG, IMU, and
 impedance data from **IDUN Guardian** earbuds over Bluetooth Low Energy.
@@ -91,18 +91,56 @@ characteristic.
 The Guardian's BLE wire format is proprietary. For authoritative EEG
 decoding, the IDUN Cloud WebSocket API can decode raw BLE packets server-side.
 
-1. Get an API token from [idun.tech](https://idun.tech/)
-2. Export it:
-   ```bash
-   export IDUN_API_TOKEN="your_api_token"
-   ```
-3. Pass `--cloud` to the CLI, or use `CloudDecoder::new("token", "device-mac")` in code
+**You do NOT need a token** for raw BLE streaming, local experimental
+decoding (`--decode`), the TUI, or impedance/battery reading.
+The cloud API token is only needed for authoritative sample-level EEG decoding.
 
-> **Keep your API token private.** Do not commit it to version control.
+#### Getting a token
 
-Local experimental decoding (`--decode` / `local-decode` feature) and raw BLE
-streaming work **without any API token**. The cloud is only needed for
-authoritative sample decoding.
+1. Create an account at [idun.tech](https://idun.tech/)
+2. Navigate to your dashboard and generate an API token
+3. Copy the token string (it looks like a long alphanumeric key)
+
+#### Using the token
+
+There are three ways to provide your IDUN API token:
+
+**Option 1: Environment variable (recommended)**
+
+```bash
+# Add to your shell profile (~/.bashrc, ~/.zshrc, etc.)
+export IDUN_API_TOKEN="your_api_token_here"
+
+# Then use --cloud in CLI or TUI
+cargo run --bin idun -- --decode --cloud
+```
+
+**Option 2: Command-line flag**
+
+```bash
+cargo run --bin idun -- --decode --cloud --token "your_api_token_here"
+```
+
+**Option 3: Programmatic (library usage)**
+
+```rust
+use idun::cloud::CloudDecoder;
+
+// Direct token
+let mut decoder = CloudDecoder::new(
+    "your_api_token_here".to_string(),
+    "AA-BB-CC-DD-EE-FF".to_string(), // device MAC address
+);
+
+// Or from IDUN_API_TOKEN environment variable
+let mut decoder = CloudDecoder::from_env(
+    "AA-BB-CC-DD-EE-FF".to_string(),
+).expect("IDUN_API_TOKEN env var must be set");
+```
+
+> **⚠️ Security**: Keep your API token private. Do not commit it to version
+> control. Use environment variables or a secrets manager in production.
+> Add `IDUN_API_TOKEN` to your `.gitignore` if storing in a file.
 
 ---
 
@@ -112,20 +150,20 @@ authoritative sample decoding.
 
 ```toml
 # Cargo.toml — full build (includes TUI + local decoder):
-idun-rs = "0.0.1"
+idun = "0.0.1"
 
 # Library only — no TUI, but keep local decoder:
-idun-rs = { version = "0.0.1", default-features = false, features = ["local-decode"] }
+idun = { version = "0.0.1", default-features = false, features = ["local-decode"] }
 
 # Minimal — no TUI, no local decoder (cloud-only or raw passthrough):
-idun-rs = { version = "0.0.1", default-features = false }
+idun = { version = "0.0.1", default-features = false }
 ```
 
 ### From source
 
 ```shell
-git clone https://github.com/user/idun-rs
-cd idun-rs
+git clone https://github.com/user/idun
+cd idun
 cargo build --release
 ```
 
@@ -143,7 +181,7 @@ cargo build --release
 ## Quick start (library)
 
 ```rust
-use idun_rs::prelude::*;
+use idun::prelude::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -232,28 +270,28 @@ handle.disconnect().await?;        // Graceful BLE disconnect
 
 ```shell
 # Basic EEG streaming
-cargo run --bin idun-rs
+cargo run --bin idun
 
 # Impedance streaming
-cargo run --bin idun-rs -- --impedance
+cargo run --bin idun -- --impedance
 
 # 60 Hz mains notch filter (Americas, Japan)
-cargo run --bin idun-rs -- --60hz
+cargo run --bin idun -- --60hz
 
 # Connect to a specific device by name or address
-cargo run --bin idun-rs -- --address "IGE-ABCDEF"
+cargo run --bin idun -- --address "IGE-ABCDEF"
 
 # Record to CSV file
-cargo run --bin idun-rs -- --csv recording.csv
+cargo run --bin idun -- --csv recording.csv
 
 # Experimental local EEG decoding + CSV
-cargo run --bin idun-rs -- --decode --csv decoded.csv
+cargo run --bin idun -- --decode --csv decoded.csv
 
 # Cloud fallback decoding
-cargo run --bin idun-rs -- --decode --cloud --token my-api-token
+cargo run --bin idun -- --decode --cloud --token my-api-token
 
 # Custom scan timeout
-cargo run --bin idun-rs -- --timeout 30
+cargo run --bin idun -- --timeout 30
 ```
 
 ### CLI flags
@@ -284,8 +322,8 @@ cargo run --bin idun-rs -- --timeout 30
 ### Enable verbose logging
 
 ```shell
-RUST_LOG=debug cargo run --bin idun-rs
-RUST_LOG=idun_rs=debug cargo run --bin idun-rs   # library logs only
+RUST_LOG=debug cargo run --bin idun
+RUST_LOG=idun=debug cargo run --bin idun   # library logs only
 ```
 
 ---
@@ -512,19 +550,19 @@ wss://ws-api.idun.cloud?authorization={api_token}
 ```shell
 # Cloud fallback with environment variable
 export IDUN_API_TOKEN=my-api-token
-cargo run --bin idun-rs -- --decode --cloud
+cargo run --bin idun -- --decode --cloud
 
 # Cloud fallback with inline token
-cargo run --bin idun-rs -- --decode --cloud --token my-api-token
+cargo run --bin idun -- --decode --cloud --token my-api-token
 
 # Cloud-only (skip local decoding attempt)
-cargo run --bin idun-rs -- --cloud --token my-api-token
+cargo run --bin idun -- --cloud --token my-api-token
 ```
 
 ### Library usage
 
 ```rust
-use idun_rs::cloud::CloudDecoder;
+use idun::cloud::CloudDecoder;
 
 let mut decoder = CloudDecoder::new(
     "my-api-token".to_string(),
@@ -719,7 +757,7 @@ The client spawns several `tokio` tasks:
 ## Project layout
 
 ```
-idun-rs/
+idun/
 ├── Cargo.toml               # Package metadata, features, dependencies
 ├── Cargo.lock
 ├── README.md                 # This file
@@ -743,10 +781,13 @@ idun-rs/
 │       └── tui.rs            # Full-screen TUI: EEG + IMU + impedance charts,
 │                             # device picker, smooth overlay, --simulate mode
 └── tests/
-    ├── parse_tests.rs        # 20 tests: EEG decoder, IMU decoder, impedance,
-    │                         # RMS, notification parser
-    ├── protocol_tests.rs     # 7 tests: UUID uniqueness, command bytes, constants
-    └── types_tests.rs        # 10 tests: all event types, clone, debug, equality
+    ├── parse_tests.rs        # 33 tests: EEG decoder, IMU decoder, impedance,
+    │                         # RMS, notification parser, edge cases
+    ├── protocol_tests.rs     # 10 tests: UUID uniqueness/SIG, command bytes, constants
+    ├── types_tests.rs        # 12 tests: all event types, clone, debug, equality
+    ├── cloud_tests.rs        # 5 tests: CloudDecoder offline, from_env, try_recv
+    ├── client_config_tests.rs # 3 tests: GuardianClientConfig defaults and clone
+    └── prelude_tests.rs      # 5 tests: all prelude re-exports
 ```
 
 ---
@@ -813,7 +854,7 @@ cargo build --no-default-features
 ## Testing
 
 ```shell
-# Run all 39 tests
+# Run all 70 tests
 cargo test
 
 # Run with verbose output
@@ -829,21 +870,23 @@ cargo test --test types_tests
 
 | Suite | Tests | Covers | Feature-gated |
 |---|---|---|---|
-| `parse_tests` | 7 | Header parser, impedance parser, edge cases | — |
-| `parse_tests::local_decode` | 13 | EEG 12-bit decoder, IMU i16 LE decoder, RMS, notification parser | `local-decode` |
-| `protocol_tests` | 7 | UUID uniqueness, command/config byte validity, sampling constants | — |
-| `types_tests` | 10 | All event types construction, Clone/Debug traits, XyzSample, DecodeSource | — |
+| `parse_tests` | 12 | Header parser, impedance parser (1/2/3/4+ bytes), edge cases | — |
+| `parse_tests::local_decode` | 21 | EEG 12-bit decoder (min/mid/max), IMU i16 LE (pos/neg/exact/extra), RMS, notification parser | `local-decode` |
+| `protocol_tests` | 10 | UUID uniqueness/SIG compliance, command/config bytes, sampling constants, channel name | — |
+| `types_tests` | 12 | All event types, Clone/Debug, XyzSample, DecodeSource, EEG with decoded samples | — |
+| `cloud_tests` | 5 | CloudDecoder construction, `from_env` (missing/present), `try_recv`, `CloudDecodedEeg` clone | — |
+| `client_config_tests` | 3 | Default config, custom config, config Clone | — |
+| `prelude_tests` | 5 | All prelude re-exports compile and are accessible | — |
 | Doc-tests | 2 | Library root example, CloudDecoder example | — |
-| **Total** | **39** | | |
+| **Total** | **70** | | |
 
-Without the `local-decode` feature, 13 decoder-specific tests are skipped,
-leaving 26 tests that always run.
+Without the `local-decode` feature, 21 decoder-specific tests are skipped.
 
 ---
 
 ## Comparison with the Python SDK
 
-| Feature | Python SDK (`idun_guardian_sdk`) | `idun-rs` |
+| Feature | Python SDK (`idun_guardian_sdk`) | `idun` |
 |---|---|---|
 | BLE scanning & connection | ✓ (`bleak`) | ✓ (`btleplug`) |
 | EEG/IMU streaming (raw) | ✓ | ✓ |
@@ -893,13 +936,13 @@ official Python SDK or a separate Rust HTTP client.
 # Add your user to the bluetooth group
 sudo usermod -aG bluetooth $USER
 # Or run with sudo (not recommended for production)
-sudo cargo run --bin idun-rs
+sudo cargo run --bin idun
 ```
 
 ### macOS Bluetooth permission
 
 macOS requires Bluetooth permission for each application. On first run:
-1. A system dialog appears: _"idun-rs" would like to use Bluetooth_
+1. A system dialog appears: _"idun" would like to use Bluetooth_
 2. Click **Allow**
 3. If previously denied: **System Settings → Privacy & Security → Bluetooth**
 
@@ -936,9 +979,9 @@ If you use this software in academic work, please cite it:
 ```bibtex
 @software{hauptmann2026idun,
   author       = {Hauptmann, Eugene},
-  title        = {idun-rs: Async Rust Client for IDUN Guardian EEG Earbuds over BLE},
+  title        = {idun: Async Rust Client for IDUN Guardian EEG Earbuds over BLE},
   year         = {2026},
-  url          = {https://github.com/eugenehp/idun-rs},
+  url          = {https://github.com/eugenehp/idun},
   version      = {0.0.1},
   license      = {MIT}
 }

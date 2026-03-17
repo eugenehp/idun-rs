@@ -1,4 +1,5 @@
-use idun_rs::protocol::*;
+use idun::protocol::*;
+use uuid::Uuid;
 
 #[test]
 fn device_name_prefix_matches_guardian() {
@@ -52,6 +53,25 @@ fn uuids_are_distinct() {
             assert_ne!(uuids[i], uuids[j], "UUID collision at index {i} and {j}");
         }
     }
+}
+
+#[test]
+fn device_info_service_is_standard_sig() {
+    // 0x180A is the standard Device Information Service UUID
+    let expected = Uuid::from_u128(0x0000180a_0000_1000_8000_00805f9b34fb);
+    assert_eq!(DEVICE_INFO_SERVICE, expected);
+}
+
+#[test]
+fn eeg_channel_name_is_eeg() {
+    assert_eq!(EEG_CHANNEL_NAME, "EEG");
+}
+
+#[test]
+fn battery_characteristic_is_standard_sig() {
+    // 0x2A19 is the standard Battery Level UUID
+    let expected = Uuid::from_u128(0x00002a19_0000_1000_8000_00805f9b34fb);
+    assert_eq!(BATTERY_CHARACTERISTIC, expected);
 }
 
 #[test]

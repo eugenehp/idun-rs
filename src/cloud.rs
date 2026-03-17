@@ -7,14 +7,40 @@
 //! # API token
 //!
 //! You need an **IDUN API token** to use the cloud decoder.
-//! Get one from <https://idun.tech/>, then either:
+//! Get one from <https://idun.tech/>, then provide it using one of:
 //!
-//! - Set the `IDUN_API_TOKEN` environment variable:
-//!   ```bash
-//!   export IDUN_API_TOKEN="your_token"
-//!   ```
-//! - Or pass it directly via [`CloudDecoder::new`]
-//! - Or use the CLI flag: `--token your_token`
+//! ### Option 1: Environment variable (recommended)
+//!
+//! ```bash
+//! export IDUN_API_TOKEN="your_api_token"
+//! ```
+//!
+//! Then use [`CloudDecoder::from_env`]:
+//!
+//! ```rust,no_run
+//! # use idun::cloud::CloudDecoder;
+//! let decoder = CloudDecoder::from_env("AA-BB-CC-DD-EE-FF".into())?;
+//! # Ok::<(), anyhow::Error>(())
+//! ```
+//!
+//! ### Option 2: Pass directly
+//!
+//! ```rust
+//! # use idun::cloud::CloudDecoder;
+//! let decoder = CloudDecoder::new(
+//!     "your_api_token".into(),
+//!     "AA-BB-CC-DD-EE-FF".into(),
+//! );
+//! ```
+//!
+//! ### Option 3: CLI flag
+//!
+//! ```bash
+//! cargo run --bin idun -- --cloud --token your_api_token
+//! ```
+//!
+//! > **Security**: Keep your API token private. Do not commit it to version
+//! > control. Use environment variables or a secrets manager in production.
 //!
 //! # Protocol
 //!
@@ -23,35 +49,58 @@
 //!
 //! ## Session flow
 //!
-//! 1. Connect WebSocket with auth token
-//! 2. Send `startNewRecording` → receive `recordingUpdate` with `recordingId`
-//! 3. Send `subscribeLiveStreamInsights` for `RAW_EEG` / `FILTERED_EEG`
-//! 4. Send `publishRawMeasurements` with base64-encoded raw BLE packets
-//! 5. Receive `liveStreamInsights` with decoded EEG data
-//! 6. Send `endOngoingRecording` when done
+//! ```text
+//! Client                              IDUN Cloud
+//! ──────                              ──────────
+//!   ──── WebSocket + auth token ────────▶
+//!   ──── startNewRecording ─────────────▶
+//!   ◀──── recordingUpdate (recordingId) ──
+//!   ──── subscribeLiveStreamInsights ───▶
+//!   ──── publishRawMeasurements ────────▶ (base64-encoded BLE packets)
+//!   ◀──── liveStreamInsights ──────────── (decoded EEG samples)
+//!   ...repeat...
+//!   ──── endOngoingRecording ───────────▶
+//! ```
+//!
+//! ## Available stream types
+//!
+//! | Type | Description |
+//! |---|---|
+//! | `RAW_EEG` | Unfiltered EEG samples |
+//! | `FILTERED_EEG` | Bandpass-filtered EEG |
+//! | `IMU` | Accelerometer + gyroscope |
 //!
 //! # Usage
 //!
 //! ```no_run
-//! use idun_rs::cloud::CloudDecoder;
+//! use idun::cloud::CloudDecoder;
 //!
 //! # #[tokio::main]
 //! # async fn main() -> anyhow::Result<()> {
+//! // Create decoder (from env or explicit token)
 //! let mut decoder = CloudDecoder::new(
 //!     "my-api-token".to_string(),
 //!     "AA-BB-CC-DD-EE-FF".to_string(),
 //! );
+//!
+//! // Connect and start a recording session
 //! decoder.connect().await?;
 //!
 //! // Send a raw BLE packet for cloud decoding
 //! let raw_packet = vec![0xAA, 0x01, /* ... */];
 //! decoder.send_raw_packet(&raw_packet, 1234567890.0, 0).await?;
 //!
-//! // Receive decoded data
+//! // Receive decoded data (blocking)
 //! if let Some(decoded) = decoder.recv_decoded().await? {
 //!     println!("Decoded: {:?}", decoded);
 //! }
 //!
+//! // Or non-blocking poll
+//! if let Some(decoded) = decoder.try_recv_decoded()? {
+//!     println!("Polled: {:?}", decoded);
+//! }
+//!
+//! // Clean shutdown
 //! decoder.disconnect().await?;
 //! # Ok(())
 //! # }

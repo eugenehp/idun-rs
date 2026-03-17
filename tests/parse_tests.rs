@@ -1,4 +1,4 @@
-use idun_rs::parse::*;
+use idun::parse::*;
 
 #[test]
 fn parse_eeg_packet_too_short() {
@@ -46,11 +46,55 @@ fn parse_impedance_4byte_le() {
     assert_eq!(parse_impedance(&[0x88, 0x13, 0x00, 0x00]), Some(5000));
 }
 
+// ── impedance edge cases ──────────────────────────────────────────────────
+
+#[test]
+fn parse_impedance_3byte_le() {
+    // 3 bytes: [0x40, 0x42, 0x0F] → 0x000F4240 = 1_000_000
+    assert_eq!(parse_impedance(&[0x40, 0x42, 0x0F]), Some(0x000F4240));
+}
+
+#[test]
+fn parse_impedance_large_4byte() {
+    // Max u32
+    assert_eq!(
+        parse_impedance(&[0xFF, 0xFF, 0xFF, 0xFF]),
+        Some(u32::MAX)
+    );
+}
+
+#[test]
+fn parse_impedance_extra_bytes_ignored() {
+    // More than 4 bytes — only first 4 used
+    assert_eq!(
+        parse_impedance(&[0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF]),
+        Some(1)
+    );
+}
+
+#[test]
+fn parse_eeg_packet_max_index() {
+    let data = vec![0x00, 0xFF, 0xAA];
+    let header = parse_eeg_packet(&data).unwrap();
+    assert_eq!(header.index, 255);
+}
+
+#[test]
+fn parse_eeg_packet_large_payload() {
+    // Realistic 32-byte payload
+    let mut data = vec![0xBB, 0x10];
+    data.extend_from_slice(&[0x80; 30]);
+    let header = parse_eeg_packet(&data).unwrap();
+    assert_eq!(header.tag, 0xBB);
+    assert_eq!(header.index, 16);
+    assert_eq!(header.payload.len(), 30);
+}
+
 // ── local-decode feature-gated tests ──────────────────────────────────────
 
 #[cfg(feature = "local-decode")]
 mod local_decode {
-    use idun_rs::parse::*;
+    use idun::parse::*;
 
     #[test]
     fn try_decode_eeg_12bit_empty() {
@@ -149,6 +193,82 @@ mod local_decode {
     fn parse_notification_short() {
         assert!(parse_notification(&[]).is_empty());
         assert!(parse_notification(&[0x01]).is_empty());
+    }
+
+    #[test]
+    fn try_decode_eeg_12bit_max_values() {
+        // All 0xFF → s0 = (0xFF<<4)|(0xFF>>4) = 0xFFF = 4095
+        //            s1 = ((0xFF&0x0F)<<8)|0xFF = 0xFFF = 4095
+        // voltage = 0.48828125 * (4095 - 2048) = 0.48828125 * 2047 ≈ 999.51
+        let samples = try_decode_eeg_12bit(&[0xFF, 0xFF, 0xFF]);
+        assert_eq!(samples.len(), 2);
+        assert!((samples[0] - 999.511).abs() < 0.01);
+        assert!((samples[1] - 999.511).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_decode_eeg_12bit_min_values() {
+        // All 0x00 → s0=0, s1=0 → voltage = 0.488 * (0 - 2048) = -1000.0
+        let samples = try_decode_eeg_12bit(&[0x00, 0x00, 0x00]);
+        assert_eq!(samples.len(), 2);
+        assert!((samples[0] - (-1000.0)).abs() < 0.001);
+        assert!((samples[1] - (-1000.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn try_decode_imu_negative_values() {
+        // ax = -1000 (LE: i16 -1000 = 0xFC18 → [0x18, 0xFC])
+        let mut data = [0u8; 12];
+        let neg: i16 = -1000;
+        let bytes = neg.to_le_bytes();
+        data[0] = bytes[0]; data[1] = bytes[1]; // ax = -1000
+        data[6] = bytes[0]; data[7] = bytes[1]; // gx = -1000
+        let (accel, gyro) = try_decode_imu_i16le(&data).unwrap();
+        assert!(accel.x < 0.0);
+        assert!((accel.x - (-1000.0 * 0.0000610352)).abs() < 0.001);
+        assert!(gyro.x < 0.0);
+        assert!((gyro.x - (-1000.0 * 0.0074768)).abs() < 0.01);
+    }
+
+    #[test]
+    fn try_decode_imu_exact_12_bytes() {
+        // Exactly 12 bytes should work
+        let data = [0u8; 12];
+        assert!(try_decode_imu_i16le(&data).is_some());
+    }
+
+    #[test]
+    fn try_decode_imu_extra_bytes() {
+        // More than 12 bytes — only first 12 used
+        let data = [0u8; 20];
+        assert!(try_decode_imu_i16le(&data).is_some());
+    }
+
+    #[test]
+    fn compute_rms_single_value() {
+        assert!((compute_rms(&[7.0]) - 7.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn compute_rms_negative_values() {
+        // RMS of [-3, -3, -3] = 3
+        assert!((compute_rms(&[-3.0, -3.0, -3.0]) - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_notification_unknown_short_payload() {
+        // 2-byte header + 5-byte payload (too short for EEG or IMU)
+        let data = vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+        let results = parse_notification(&data);
+        assert!(!results.is_empty());
+        // Should be Unknown since payload is too short for decode
+        match &results[0] {
+            ParsedPacket::Unknown { index, tag, .. } => {
+                assert_eq!(*tag, 0x01);
+                assert_eq!(*index, 0x02);
+            }
+            _ => panic!("Expected Unknown variant for short payload"),
+        }
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use idun_rs::types::*;
+use idun::types::*;
 
 #[test]
 fn eeg_reading_debug() {
@@ -116,6 +116,33 @@ fn guardian_event_clone() {
     } else {
         panic!("Clone changed variant");
     }
+}
+
+#[test]
+fn eeg_reading_with_decoded_samples() {
+    let r = EegReading {
+        index: 1,
+        timestamp: 1000.0,
+        raw_data: vec![0xAA, 1, 2, 3],
+        samples: Some(vec![0.5, -0.3, 1.2]),
+        decode_source: DecodeSource::Local,
+    };
+    assert_eq!(r.samples.as_ref().unwrap().len(), 3);
+    assert_eq!(r.decode_source, DecodeSource::Local);
+}
+
+#[test]
+fn eeg_reading_cloud_source() {
+    let r = EegReading {
+        index: 0,
+        timestamp: 0.0,
+        raw_data: vec![],
+        samples: Some(vec![1.0]),
+        decode_source: DecodeSource::Cloud,
+    };
+    assert_eq!(r.decode_source, DecodeSource::Cloud);
+    assert_ne!(r.decode_source, DecodeSource::Local);
+    assert_ne!(r.decode_source, DecodeSource::None);
 }
 
 #[test]

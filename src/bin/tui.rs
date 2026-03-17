@@ -67,13 +67,13 @@ use ratatui::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-use idun_rs::guardian_client::{
+use idun::guardian_client::{
     GuardianClient, GuardianClientConfig, GuardianDevice, GuardianHandle,
 };
 #[cfg(feature = "local-decode")]
-use idun_rs::parse::try_decode_eeg_12bit;
-use idun_rs::protocol::{EEG_SAMPLE_RATE, EEG_SAMPLES_PER_PACKET};
-use idun_rs::types::GuardianEvent;
+use idun::parse::try_decode_eeg_12bit;
+use idun::protocol::{EEG_SAMPLE_RATE, EEG_SAMPLES_PER_PACKET};
+use idun::types::GuardianEvent;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

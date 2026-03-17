@@ -1,6 +1,6 @@
 [package]
-name          = "idun-rs"
-version       = "0.0.1"
+name          = "idun"
+version       = "0.0.2"
 edition       = "2021"
 rust-version  = "1.75"
 description   = "Async Rust client, CLI, and TUI for streaming real-time EEG, IMU, and impedance data from IDUN Guardian earbuds over Bluetooth Low Energy"
@@ -8,9 +8,9 @@ keywords      = ["eeg", "imu", "guardian", "idun", "neuroscience"]
 categories    = ["hardware-support", "science", "command-line-utilities"]
 license       = "MIT"
 readme        = "README.md"
-homepage      = "https://github.com/eugenehp/idun-rs"
-repository    = "https://github.com/eugenehp/idun-rs"
-documentation = "https://docs.rs/idun-rs"
+homepage      = "https://github.com/eugenehp/idun"
+repository    = "https://github.com/eugenehp/idun"
+documentation = "https://docs.rs/idun"
 include       = [
     "src/**/*.rs",
     "tests/**/*.rs",
@@ -21,18 +21,18 @@ include       = [
 ]
 
 # ── Library target ────────────────────────────────────────────────────────────
-# Produces `libidun_rs.rlib`.  Downstream crates depend on this target;
+# Produces `libidun.rlib`.  Downstream crates depend on this target;
 # the CLI and TUI binaries below are separate.
 
 [lib]
-name = "idun_rs"
+name = "idun"
 path = "src/lib.rs"
 
 # ── Binary targets ────────────────────────────────────────────────────────────
 
 # Headless CLI: scan, connect, and print all events to stdout.
 [[bin]]
-name = "idun-rs"
+name = "idun"
 path = "src/main.rs"
 
 # Full-screen ratatui TUI — requires the `tui` feature (enabled by default).
@@ -50,8 +50,8 @@ required-features = ["tui"]
 # opt out and avoid compiling those dependencies:
 #
 #   [dependencies]
-#   idun-rs = { version = "0.1.0", default-features = false }
-#   idun-rs = { version = "0.1.0", default-features = false, features = ["local-decode"] }
+#   idun = { version = "0.1.0", default-features = false }
+#   idun = { version = "0.1.0", default-features = false, features = ["local-decode"] }
 
 [features]
 default      = ["tui", "local-decode"]

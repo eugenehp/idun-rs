@@ -1,7 +1,54 @@
 //! BLE client for IDUN Guardian EEG earbuds.
 //!
-//! Handles scanning, connecting, GATT subscription, and notification dispatch.
-//! Mirrors the architecture of muse-rs but adapted for the Guardian protocol.
+//! This module provides the primary API for interacting with Guardian earbuds:
+//!
+//! - [`GuardianClient`] — scan for and connect to Guardian devices
+//! - [`GuardianHandle`] — send commands to a connected device (start/stop recording,
+//!   impedance, LED control, battery reading)
+//! - [`GuardianDevice`] — a discovered device from a BLE scan
+//! - [`GuardianClientConfig`] — connection configuration (notch filter, scan timeout, name prefix)
+//!
+//! # Connection flow
+//!
+//! ```text
+//! GuardianClient::new(config)
+//!     ├── scan_all()       → Vec<GuardianDevice>
+//!     │       └── connect_to(device) → (Receiver<GuardianEvent>, GuardianHandle)
+//!     └── connect()        → (Receiver<GuardianEvent>, GuardianHandle)  [auto-picks first]
+//! ```
+//!
+//! # Background tasks
+//!
+//! After connection, three `tokio` tasks run in the background:
+//!
+//! | Task | Purpose | Lifecycle |
+//! |---|---|---|
+//! | Notification dispatcher | Routes BLE notifications → `GuardianEvent` variants | Until disconnect |
+//! | Battery poller | Reads battery every 60s | Until disconnect |
+//! | Disconnect watcher | Detects BLE link loss | Until disconnect |
+//!
+//! # Example
+//!
+//! ```no_run
+//! use idun::guardian_client::{GuardianClient, GuardianClientConfig};
+//! use idun::types::GuardianEvent;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> anyhow::Result<()> {
+//! let client = GuardianClient::new(GuardianClientConfig::default());
+//! let (mut rx, handle) = client.connect().await?;
+//! handle.start_recording().await?;
+//!
+//! while let Some(event) = rx.recv().await {
+//!     match event {
+//!         GuardianEvent::Eeg(r) => println!("EEG #{}", r.index),
+//!         GuardianEvent::Disconnected => break,
+//!         _ => {}
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::BTreeSet;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

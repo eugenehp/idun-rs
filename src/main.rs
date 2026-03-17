@@ -4,11 +4,11 @@ use std::path::PathBuf;
 use anyhow::Result;
 use log::{error, info, warn};
 
-use idun_rs::cloud::CloudDecoder;
-use idun_rs::guardian_client::{GuardianClient, GuardianClientConfig};
+use idun::cloud::CloudDecoder;
+use idun::guardian_client::{GuardianClient, GuardianClientConfig};
 #[cfg(feature = "local-decode")]
-use idun_rs::parse::{parse_eeg_packet, try_decode_eeg_12bit};
-use idun_rs::types::{DecodeSource, GuardianEvent};
+use idun::parse::{parse_eeg_packet, try_decode_eeg_12bit};
+use idun::types::{DecodeSource, GuardianEvent};
 
 /// Heuristic: check if decoded samples look like valid EEG.
 ///
@@ -31,7 +31,7 @@ fn samples_look_valid(samples: &[f64]) -> bool {
 }
 
 fn print_usage() {
-    eprintln!("Usage: idun-rs [OPTIONS]");
+    eprintln!("Usage: idun [OPTIONS]");
     eprintln!();
     eprintln!("Options:");
     eprintln!("  --impedance     Stream impedance instead of EEG");
