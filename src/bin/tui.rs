@@ -423,7 +423,7 @@ fn spawn_simulator(app: Arc<Mutex<App>>) {
             pkt += 1;
 
             // IMU (~52 Hz → every ~4 EEG packets)
-            if pkt % 4 == 0 {
+            if pkt.is_multiple_of(4) {
                 let ax = (0.01 * (2.0 * PI * 0.3 * t).sin()) as f32;
                 let ay = (0.02 * (2.0 * PI * 0.5 * t).cos()) as f32;
                 let az = (-1.0 + 0.005 * (2.0 * PI * 0.1 * t).sin()) as f32;
@@ -436,10 +436,10 @@ fn spawn_simulator(app: Arc<Mutex<App>>) {
             }
 
             // Impedance (~every 500ms → every 6 packets)
-            if pkt % 6 == 0 { s.push_impedance(sim_impedance(t)); }
+            if pkt.is_multiple_of(6) { s.push_impedance(sim_impedance(t)); }
 
             // Battery drain
-            if pkt % 750 == 0 {
+            if pkt.is_multiple_of(750) {
                 s.battery = Some((92.0 - t / 60.0).clamp(0.0, 100.0) as u8);
             }
         }

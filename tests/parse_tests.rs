@@ -35,23 +35,23 @@ fn parse_impedance_1byte() {
 }
 
 #[test]
-fn parse_impedance_2byte_le() {
-    // 0x1234 = 4660 in LE: [0x34, 0x12]
-    assert_eq!(parse_impedance(&[0x34, 0x12]), Some(0x1234));
+fn parse_impedance_2byte_be() {
+    // 0x1234 = 4660 in BE: [0x12, 0x34]
+    assert_eq!(parse_impedance(&[0x12, 0x34]), Some(0x1234));
 }
 
 #[test]
-fn parse_impedance_4byte_le() {
-    // 5000 ohms = 0x00001388 in LE: [0x88, 0x13, 0x00, 0x00]
-    assert_eq!(parse_impedance(&[0x88, 0x13, 0x00, 0x00]), Some(5000));
+fn parse_impedance_4byte_be() {
+    // 5000 ohms = 0x00001388 in BE: [0x00, 0x00, 0x13, 0x88]
+    assert_eq!(parse_impedance(&[0x00, 0x00, 0x13, 0x88]), Some(5000));
 }
 
 // ── impedance edge cases ──────────────────────────────────────────────────
 
 #[test]
-fn parse_impedance_3byte_le() {
-    // 3 bytes: [0x40, 0x42, 0x0F] → 0x000F4240 = 1_000_000
-    assert_eq!(parse_impedance(&[0x40, 0x42, 0x0F]), Some(0x000F4240));
+fn parse_impedance_3byte_be() {
+    // 3 bytes: [0x0F, 0x42, 0x40] → 0x000F4240 = 1_000_000
+    assert_eq!(parse_impedance(&[0x0F, 0x42, 0x40]), Some(0x000F4240));
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn parse_impedance_large_4byte() {
 fn parse_impedance_extra_bytes_ignored() {
     // More than 4 bytes — only first 4 used
     assert_eq!(
-        parse_impedance(&[0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF]),
+        parse_impedance(&[0x00, 0x00, 0x00, 0x01, 0xFF, 0xFF]),
         Some(1)
     );
 }

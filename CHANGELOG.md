@@ -1,5 +1,62 @@
 # Changelog
 
+## v0.0.4 — 2026-10-15
+
+### Changed
+
+- **BLE backend is now [webbluetooth](https://github.com/eugenehp/webbluetooth)
+  0.0.4** instead of `btleplug` — the same backend as `muse-rs` 0.2.2, a Rust
+  port of the Web Bluetooth API over CoreBluetooth, BlueZ, WinRT and Android.
+  The `GuardianClient` / `GuardianHandle` API is unchanged.
+  - The macOS "wait for `CBCentralManager` to reach poweredOn" polling loops
+    are gone; `Bluetooth::availability()` waits for the adapter's first state
+    report, and reports *why* it is unusable when it is not.
+  - Disconnects come from `BluetoothDevice::watch_disconnect()` — per device,
+    rather than filtering an adapter-wide event stream. In 0.0.4 a
+    notification stream also ends when its device disconnects, so the
+    dispatcher's `GuardianEvent::Disconnected` arrives reliably alongside the
+    watcher's.
+  - One adapter session per process, via `Bluetooth::shared()`. A device is
+    only usable through the session that found it, and the TUI scans with one
+    `GuardianClient` and connects with another.
+  - `connect()` returns on the first matching advertisement instead of polling
+    the peripheral list every 250 ms.
+  - Impedance notifications get their own subscription, opened by
+    `start_impedance` and dropped by `stop_impedance`.
+  - Access is scoped by the Web Bluetooth grant model to the three services
+    the Guardian uses: the vendor service `beffd56c-…-fcc3`, Device
+    Information (`0x180A`) and Battery (`0x180F`). The GATT blocklist is
+    enforced.
+- **MSRV is now 1.94**, which webbluetooth requires.
+- **The MAC is read from the vendor device-ID characteristic (`…fccb`)**
+  rather than from Serial Number String (`0x2A25`), which is on the Web
+  Bluetooth GATT blocklist as a tracking identifier and so is never readable. The trailing terminator character is
+  dropped and colons become dashes, so `DeviceInfo::mac_address` keeps its
+  `AA-BB-CC-DD-EE-FF` format.
+
+### Fixed
+
+- **Impedance was decoded with the wrong byte order.** `fcc8` carries a
+  big-endian `u32`, and `parse_impedance` read it little-endian, so a 5 kΩ
+  reading (`00 00 13 88`) came out as ~2.3 GΩ. The client also had its own
+  copy of the decoding, which disagreed with `parse_impedance` on 3-byte
+  payloads; it now calls `parse_impedance`.
+- **`cloud_tests` was flaky.** `from_env_missing` and `from_env_present` set
+  and cleared `IDUN_API_TOKEN` on parallel test threads; they are now
+  serialised.
+
+### Added
+
+- `protocol::GUARDIAN_SERVICE` (`fcc3`), `protocol::BATTERY_SERVICE`
+  (`0x180F`) and `protocol::DEVICE_ID_CHARACTERISTIC` (`fccb`).
+
+### Removed
+
+- The `btleplug` dependency, and with it the Linux build-time requirement on
+  `libdbus-1-dev` / `pkg-config`: webbluetooth speaks D-Bus directly.
+
+---
+
 ## v0.0.3 — 2026-03-17
 
 ### Added

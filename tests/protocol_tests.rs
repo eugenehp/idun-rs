@@ -91,3 +91,25 @@ fn vendor_uuids_share_base() {
         );
     }
 }
+
+#[test]
+fn guardian_service_shares_vendor_base() {
+    assert_eq!(
+        GUARDIAN_SERVICE.to_string(),
+        "beffd56c-c915-48f5-930d-4c1feee0fcc3"
+    );
+}
+
+#[test]
+fn device_id_characteristic_uuid() {
+    assert_eq!(
+        DEVICE_ID_CHARACTERISTIC.to_string(),
+        "beffd56c-c915-48f5-930d-4c1feee0fccb"
+    );
+}
+
+#[test]
+fn battery_service_is_standard_sig() {
+    let expected = Uuid::parse_str("0000180f-0000-1000-8000-00805f9b34fb").unwrap();
+    assert_eq!(BATTERY_SERVICE, expected);
+}

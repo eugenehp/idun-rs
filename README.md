@@ -150,13 +150,13 @@ let mut decoder = CloudDecoder::from_env(
 
 ```toml
 # Cargo.toml — full build (includes TUI + local decoder):
-idun = "0.0.1"
+idun = "0.0.4"
 
 # Library only — no TUI, but keep local decoder:
-idun = { version = "0.0.1", default-features = false, features = ["local-decode"] }
+idun = { version = "0.0.4", default-features = false, features = ["local-decode"] }
 
 # Minimal — no TUI, no local decoder (cloud-only or raw passthrough):
-idun = { version = "0.0.1", default-features = false }
+idun = { version = "0.0.4", default-features = false }
 ```
 
 ### From source
@@ -171,10 +171,11 @@ cargo build --release
 
 | Platform | Requirement | Install |
 |---|---|---|
-| Linux (Debian/Ubuntu) | D-Bus dev libs | `sudo apt install libdbus-1-dev pkg-config` |
-| Linux (Fedora) | D-Bus dev libs | `sudo dnf install dbus-devel` |
+| Linux | BlueZ (`bluetoothd`) running | Usually preinstalled; `sudo apt install bluez` / `sudo dnf install bluez`. No build-time libraries — D-Bus is spoken directly, without `libdbus` |
 | macOS | Core Bluetooth | Built-in (grant Bluetooth permission on first run) |
 | Windows | WinRT Bluetooth | Built-in |
+
+Requires Rust 1.94 or newer.
 
 ---
 
@@ -592,12 +593,14 @@ decoder.disconnect().await?;
 
 | UUID suffix | Full UUID | Purpose | Direction |
 |---|---|---|---|
+| `fcc3` | `beffd56c-c915-48f5-930d-4c1feee0fcc3` | Guardian vendor service | — |
 | `fcc4` | `beffd56c-c915-48f5-930d-4c1feee0fcc4` | EEG + IMU data | Notify |
 | `fcc8` | `beffd56c-c915-48f5-930d-4c1feee0fcc8` | Impedance data | Notify |
 | `fcc9` | `beffd56c-c915-48f5-930d-4c1feee0fcc9` | Configuration | Write |
 | `fcca` | `beffd56c-c915-48f5-930d-4c1feee0fcca` | Commands | Write |
+| `fccb` | `beffd56c-c915-48f5-930d-4c1feee0fccb` | Device ID (MAC) | Read |
 | `2A19` | Standard BLE SIG | Battery Level | Read |
-| `2A25` | Standard BLE SIG | Serial Number / MAC ID | Read |
+| `2A25` | Standard BLE SIG | Serial Number / MAC ID | Read (on the Web Bluetooth GATT blocklist — not readable) |
 | `2A26` | Standard BLE SIG | Firmware Revision | Read |
 | `2A27` | Standard BLE SIG | Hardware Revision | Read |
 
@@ -669,11 +672,11 @@ Scale factors assume a common MEMS IMU (e.g., LSM6DS3) configuration.
 
 ### Impedance format
 
-Impedance notifications on `fcc8` are little-endian unsigned integers
-(1–4 bytes depending on payload size):
+Impedance notifications on `fcc8` are big-endian unsigned 32-bit integers.
+Shorter payloads are read as a big-endian integer of the bytes present:
 
 ```
-impedance_ohms = u32_LE(data[0..4])
+impedance_ohms = u32_BE(data[0..4])
 impedance_kohms = impedance_ohms / 1000.0
 ```
 
@@ -721,7 +724,7 @@ GuardianHandle                          CloudDecoder
 
 ```
 ┌─────────────────┐     BLE notify     ┌──────────────────┐
-│  Guardian Earbud │ ──────────────────▶│  btleplug        │
+│  Guardian Earbud │ ──────────────────▶│  webbluetooth    │
 │  (BLE peripheral)│    char fcc4       │  notification    │
 └─────────────────┘                    │  stream          │
                                        └────────┬─────────┘
@@ -750,7 +753,8 @@ The client spawns several `tokio` tasks:
 |---|---|---|
 | Notification dispatcher | Routes BLE notifications to appropriate parsers | Connected → Disconnected |
 | Battery poller | Reads battery level every 60 seconds | Connected → Disconnected |
-| Disconnect watcher | Monitors BLE adapter events for disconnect | Connected → Disconnected |
+| Disconnect watcher | `BluetoothDevice::watch_disconnect()` for this device | Connected → Disconnected |
+| Impedance forwarder | Forwards `fcc8` notifications while impedance streaming is on | `start_impedance` → `stop_impedance` |
 
 ---
 
@@ -783,10 +787,10 @@ idun/
 └── tests/
     ├── parse_tests.rs        # 33 tests: EEG decoder, IMU decoder, impedance,
     │                         # RMS, notification parser, edge cases
-    ├── protocol_tests.rs     # 10 tests: UUID uniqueness/SIG, command bytes, constants
+    ├── protocol_tests.rs     # 13 tests: UUID uniqueness/SIG, command bytes, constants
     ├── types_tests.rs        # 12 tests: all event types, clone, debug, equality
     ├── cloud_tests.rs        # 5 tests: CloudDecoder offline, from_env, try_recv
-    ├── client_config_tests.rs # 3 tests: GuardianClientConfig defaults and clone
+    ├── client_config_tests.rs # 4 tests: GuardianClientConfig defaults and clone
     └── prelude_tests.rs      # 5 tests: all prelude re-exports
 ```
 
@@ -815,7 +819,7 @@ let client = GuardianClient::new(config);
 
 | Crate | Version | Purpose |
 |---|---|---|
-| [btleplug](https://crates.io/crates/btleplug) | 0.11 | Cross-platform BLE (scan, connect, GATT) |
+| [webbluetooth](https://crates.io/crates/webbluetooth) | 0.0.4 | Cross-platform BLE (scan, connect, GATT) via the Web Bluetooth API |
 | [tokio](https://tokio.rs) | 1.x | Async runtime (full features) |
 | [tokio-tungstenite](https://crates.io/crates/tokio-tungstenite) | 0.24 | WebSocket client for IDUN Cloud API |
 | [uuid](https://crates.io/crates/uuid) | 1.x | GATT UUID construction |
@@ -854,7 +858,7 @@ cargo build --no-default-features
 ## Testing
 
 ```shell
-# Run all 70 tests
+# Run all 94 tests
 cargo test
 
 # Run with verbose output
@@ -870,17 +874,18 @@ cargo test --test types_tests
 
 | Suite | Tests | Covers | Feature-gated |
 |---|---|---|---|
-| `parse_tests` | 12 | Header parser, impedance parser (1/2/3/4+ bytes), edge cases | — |
+| `parse_tests` | 12 | Header parser, big-endian impedance parser (1/2/3/4+ bytes), edge cases | — |
 | `parse_tests::local_decode` | 21 | EEG 12-bit decoder (min/mid/max), IMU i16 LE (pos/neg/exact/extra), RMS, notification parser | `local-decode` |
-| `protocol_tests` | 10 | UUID uniqueness/SIG compliance, command/config bytes, sampling constants, channel name | — |
+| `protocol_tests` | 13 | UUID uniqueness/SIG compliance, vendor service and device-ID UUIDs, command/config bytes, sampling constants, channel name | — |
 | `types_tests` | 12 | All event types, Clone/Debug, XyzSample, DecodeSource, EEG with decoded samples | — |
 | `cloud_tests` | 5 | CloudDecoder construction, `from_env` (missing/present), `try_recv`, `CloudDecodedEeg` clone | — |
-| `client_config_tests` | 3 | Default config, custom config, config Clone | — |
+| `client_config_tests` | 4 | Default config, custom config, config Clone, `api_token` default | — |
 | `prelude_tests` | 5 | All prelude re-exports compile and are accessible | — |
-| Doc-tests | 2 | Library root example, CloudDecoder example | — |
-| **Total** | **70** | | |
+| `guardian_client` unit tests | 2 | Device-ID (MAC) parsing | — |
+| Doc-tests | 20 | Examples in the API docs (3 need `local-decode`) | — |
+| **Total** | **94** | | |
 
-Without the `local-decode` feature, 21 decoder-specific tests are skipped.
+Without the `local-decode` feature, 25 decoder-specific tests are skipped (21 in `parse_tests`, 1 in `prelude_tests`, 3 doc-tests).
 
 ---
 
@@ -888,7 +893,7 @@ Without the `local-decode` feature, 21 decoder-specific tests are skipped.
 
 | Feature | Python SDK (`idun_guardian_sdk`) | `idun` |
 |---|---|---|
-| BLE scanning & connection | ✓ (`bleak`) | ✓ (`btleplug`) |
+| BLE scanning & connection | ✓ (`bleak`) | ✓ (`webbluetooth`) |
 | EEG/IMU streaming (raw) | ✓ | ✓ |
 | Impedance streaming | ✓ | ✓ |
 | Battery reading | ✓ | ✓ |
@@ -966,7 +971,7 @@ Options:
 
 - [IDUN Technologies](https://idun.tech/) — Official IDUN Guardian manufacturer
 - [IDUN Guardian SDK](https://github.com/iduntechnologies/idun-guardian-sdk) — Official Python SDK (BLE + cloud API)
-- [btleplug](https://github.com/deviceplug/btleplug) — Cross-platform BLE library for Rust
+- [webbluetooth](https://github.com/eugenehp/webbluetooth) — Rust port of the Web Bluetooth API over CoreBluetooth, BlueZ, WinRT and Android
 - [ratatui](https://ratatui.rs/) — Terminal UI framework for Rust
 - [muse-rs](https://github.com/eugenehp/muse-rs) — Similar Rust project for Muse EEG headsets (architectural reference)
 
@@ -982,7 +987,7 @@ If you use this software in academic work, please cite it:
   title        = {idun: Async Rust Client for IDUN Guardian EEG Earbuds over BLE},
   year         = {2026},
   url          = {https://github.com/eugenehp/idun},
-  version      = {0.0.1},
+  version      = {0.0.4},
   license      = {MIT}
 }
 ```

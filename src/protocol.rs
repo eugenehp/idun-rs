@@ -8,12 +8,14 @@
 //!
 //! | UUID suffix | Full UUID | Purpose | Direction |
 //! |---|---|---|---|
+//! | `fcc3` | `beffd56c-c915-48f5-930d-4c1feee0fcc3` | Guardian vendor service | — |
 //! | `fcc4` | `beffd56c-c915-48f5-930d-4c1feee0fcc4` | EEG + IMU data | Notify |
 //! | `fcc8` | `beffd56c-c915-48f5-930d-4c1feee0fcc8` | Impedance data | Notify |
 //! | `fcc9` | `beffd56c-c915-48f5-930d-4c1feee0fcc9` | Configuration | Write |
 //! | `fcca` | `beffd56c-c915-48f5-930d-4c1feee0fcca` | Commands | Write |
+//! | `fccb` | `beffd56c-c915-48f5-930d-4c1feee0fccb` | Device ID (MAC) | Read |
 //! | `2A19` | Standard BLE SIG | Battery Level | Read |
-//! | `2A25` | Standard BLE SIG | Serial Number / MAC ID | Read |
+//! | `2A25` | Standard BLE SIG | Serial Number / MAC ID | Read (blocklisted) |
 //! | `2A26` | Standard BLE SIG | Firmware Revision | Read |
 //! | `2A27` | Standard BLE SIG | Hardware Revision | Read |
 //!
@@ -47,10 +49,18 @@ use uuid::Uuid;
 pub const DEVICE_INFO_SERVICE: Uuid =
     Uuid::from_u128(0x0000180a_0000_1000_8000_00805f9b34fb);
 
+/// Battery Service UUID (`0x180F`, standard BLE SIG).
+///
+/// Holds [`BATTERY_CHARACTERISTIC`].
+pub const BATTERY_SERVICE: Uuid =
+    Uuid::from_u128(0x0000180f_0000_1000_8000_00805f9b34fb);
+
 /// Serial Number / MAC ID characteristic (`0x2A25`, standard BLE SIG).
 ///
 /// The Guardian stores its MAC address here as a UTF-8 string
-/// (e.g. `"AA:BB:CC:DD:EE:FF"`).
+/// (e.g. `"AA:BB:CC:DD:EE:FF"`), but the Web Bluetooth GATT blocklist excludes
+/// this characteristic as a tracking identifier, so it is never readable. The
+/// client reads [`DEVICE_ID_CHARACTERISTIC`] instead.
 pub const MAC_ID_CHARACTERISTIC: Uuid =
     Uuid::from_u128(0x00002a25_0000_1000_8000_00805f9b34fb);
 
@@ -72,6 +82,14 @@ pub const BATTERY_CHARACTERISTIC: Uuid =
 //
 // All vendor UUIDs share the base `beffd56c-c915-48f5-930d-4c1feee0fc__`,
 // differing only in the last two bytes.
+
+/// Guardian vendor service (`fcc3`).
+///
+/// Every vendor characteristic below lives under it. Named in the device
+/// request — together with [`DEVICE_INFO_SERVICE`] and [`BATTERY_SERVICE`] —
+/// because a Web Bluetooth grant covers exactly the services a request lists.
+pub const GUARDIAN_SERVICE: Uuid =
+    Uuid::from_u128(0xbeffd56c_c915_48f5_930d_4c1feee0fcc3);
 
 /// EEG + IMU measurement characteristic (`fcc4`, notifications).
 ///
@@ -109,6 +127,15 @@ pub const CONFIG_CHARACTERISTIC: Uuid =
 /// [`CMD_START_IMPEDANCE`], [`CMD_STOP_IMPEDANCE`].
 pub const COMMAND_CHARACTERISTIC: Uuid =
     Uuid::from_u128(0xbeffd56c_c915_48f5_930d_4c1feee0fcca);
+
+/// Device ID characteristic (`fccb`, read).
+///
+/// The earbud's MAC address as a UTF-8 string with a one-character
+/// terminator, e.g. `"AA:BB:CC:DD:EE:FF"` plus one byte. The client reads
+/// the MAC from here rather than from [`MAC_ID_CHARACTERISTIC`], which is on
+/// the Web Bluetooth GATT blocklist.
+pub const DEVICE_ID_CHARACTERISTIC: Uuid =
+    Uuid::from_u128(0xbeffd56c_c915_48f5_930d_4c1feee0fccb);
 
 // ── Device commands ──────────────────────────────────────────────────────────
 

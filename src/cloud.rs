@@ -246,7 +246,7 @@ impl CloudDecoder {
         // ── Writer task: drain out_tx and send to WebSocket ──────────────
         tokio::spawn(async move {
             while let Some(msg) = out_rx.recv().await {
-                if let Err(e) = ws_write.send(Message::Text(msg.into())).await {
+                if let Err(e) = ws_write.send(Message::Text(msg)).await {
                     error!("[CLOUD] WebSocket write error: {e}");
                     break;
                 }

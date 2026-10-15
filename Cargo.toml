@@ -1,8 +1,9 @@
 [package]
 name          = "idun"
-version       = "0.0.3"
+version       = "0.0.4"
 edition       = "2021"
-rust-version  = "1.75"
+# webbluetooth requires it, so this crate does too.
+rust-version  = "1.94"
 description   = "Async Rust client, CLI, and TUI for streaming real-time EEG, IMU, and impedance data from IDUN Guardian earbuds over Bluetooth Low Energy"
 keywords      = ["eeg", "imu", "guardian", "idun", "neuroscience"]
 categories    = ["hardware-support", "science", "command-line-utilities"]
@@ -50,8 +51,8 @@ required-features = ["tui"]
 # opt out and avoid compiling those dependencies:
 #
 #   [dependencies]
-#   idun = { version = "0.1.0", default-features = false }
-#   idun = { version = "0.1.0", default-features = false, features = ["local-decode"] }
+#   idun = { version = "0.0.4", default-features = false }
+#   idun = { version = "0.0.4", default-features = false, features = ["local-decode"] }
 
 [features]
 default      = ["tui", "local-decode"]
@@ -62,7 +63,14 @@ simulate     = []
 # ── Core library dependencies ─────────────────────────────────────────────────
 
 [dependencies]
-btleplug          = "0.11.8"
+# The `uuid` feature lets `protocol`'s `Uuid` constants be passed straight in.
+#
+# Must stay in lockstep with every other `webbluetooth` requirement in a
+# consuming graph. Cargo treats 0.0.x releases as mutually incompatible, so a
+# consumer pinned to a different 0.0.x than this crate resolves to *two*
+# copies of the crate — and `Bluetooth::shared()` memoises into a `OnceLock`,
+# so two copies means two BLE sessions and devices that will not connect.
+webbluetooth      = { version = "0.0.4", features = ["uuid"] }
 tokio             = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 uuid              = { version = "1", features = ["v4"] }

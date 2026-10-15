@@ -1,4 +1,10 @@
+use std::sync::Mutex;
+
 use idun::cloud::CloudDecoder;
+
+/// Serialises the tests that touch `IDUN_API_TOKEN`: the test harness runs
+/// tests on parallel threads, and the environment is process-wide.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn cloud_decoder_new_defaults() {
@@ -16,6 +22,7 @@ fn cloud_decoder_try_recv_when_not_connected() {
 
 #[test]
 fn cloud_decoder_from_env_missing() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Ensure the env var is unset for this test
     std::env::remove_var("IDUN_API_TOKEN");
     let result = CloudDecoder::from_env("AA-BB".into());
@@ -26,6 +33,7 @@ fn cloud_decoder_from_env_missing() {
 
 #[test]
 fn cloud_decoder_from_env_present() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("IDUN_API_TOKEN", "test-token-123");
     let dec = CloudDecoder::from_env("AA-BB".into()).unwrap();
     assert!(!dec.is_connected());

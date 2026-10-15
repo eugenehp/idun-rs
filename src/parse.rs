@@ -15,7 +15,7 @@
 //! | Function | Feature | Description |
 //! |---|---|---|
 //! | [`parse_eeg_packet`] | always | Extract header (tag + index) and payload |
-//! | [`parse_impedance`] | always | Decode impedance from LE unsigned int |
+//! | [`parse_impedance`] | always | Decode impedance from BE unsigned int |
 //! | [`try_decode_eeg_12bit`] | `local-decode` | Speculative 12-bit packed EEG decoder |
 //! | [`try_decode_imu_i16le`] | `local-decode` | Decode 6×i16 LE as accel + gyro |
 //! | [`parse_notification`] | `local-decode` | Heuristic classifier for EEG vs IMU |
@@ -192,9 +192,11 @@ pub fn parse_notification(data: &[u8]) -> Vec<ParsedPacket> {
 
 /// Parse an impedance BLE notification into ohms.
 ///
-/// The earbud sends impedance as a little-endian unsigned integer
-/// on characteristic [`IMPEDANCE_CHARACTERISTIC`](crate::protocol::IMPEDANCE_CHARACTERISTIC).
-/// The payload length varies (1–4 bytes).
+/// The earbud sends impedance as a big-endian unsigned 32-bit integer on
+/// characteristic [`IMPEDANCE_CHARACTERISTIC`](crate::protocol::IMPEDANCE_CHARACTERISTIC).
+/// Shorter payloads are read as a
+/// big-endian integer of whatever bytes there are; bytes past the fourth are
+/// ignored.
 ///
 /// Returns `None` for empty payloads.
 ///
@@ -202,7 +204,7 @@ pub fn parse_notification(data: &[u8]) -> Vec<ParsedPacket> {
 ///
 /// ```rust
 /// # use idun::parse::parse_impedance;
-/// assert_eq!(parse_impedance(&[0x88, 0x13, 0x00, 0x00]), Some(5000));
+/// assert_eq!(parse_impedance(&[0x00, 0x00, 0x13, 0x88]), Some(5000));
 /// assert_eq!(parse_impedance(&[200]), Some(200));
 /// assert!(parse_impedance(&[]).is_none());
 /// ```
@@ -210,9 +212,9 @@ pub fn parse_impedance(data: &[u8]) -> Option<u32> {
     match data.len() {
         0 => None,
         1 => Some(data[0] as u32),
-        2 => Some(u16::from_le_bytes([data[0], data[1]]) as u32),
-        3 => Some(u32::from_le_bytes([data[0], data[1], data[2], 0])),
-        _ => Some(u32::from_le_bytes([data[0], data[1], data[2], data[3]])),
+        2 => Some(u16::from_be_bytes([data[0], data[1]]) as u32),
+        3 => Some(u32::from_be_bytes([0, data[0], data[1], data[2]])),
+        _ => Some(u32::from_be_bytes([data[0], data[1], data[2], data[3]])),
     }
 }
 

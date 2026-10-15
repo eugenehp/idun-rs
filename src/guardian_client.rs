@@ -27,6 +27,9 @@
 //! | Battery poller | Reads battery every 60s | Until disconnect |
 //! | Disconnect watcher | Detects BLE link loss | Until disconnect |
 //!
+//! A fourth forwards impedance notifications between
+//! [`GuardianHandle::start_impedance`] and [`GuardianHandle::stop_impedance`].
+//!
 //! # Example
 //!
 //! ```no_run
@@ -50,21 +53,127 @@
 //! # }
 //! ```
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Result};
-use btleplug::api::{
-    Central, CentralEvent, Characteristic, Manager as _, Peripheral as _, ScanFilter, WriteType,
-};
-use btleplug::platform::{Adapter, Manager, Peripheral};
-use futures::StreamExt;
+use anyhow::{anyhow, Context, Result};
 use log::{debug, info, warn};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
+use webbluetooth::chooser::{Candidate, FirstMatch};
+use webbluetooth::stream::{BoxStream, StreamExt};
+use webbluetooth::uuid::BluetoothUuid;
+use webbluetooth::{
+    Bluetooth, BluetoothDevice, DeviceFilter, Grant, LeScanOptions, RemoteGattCharacteristic,
+    RemoteGattServer, RequestDeviceOptions,
+};
 
 use crate::protocol::*;
 use crate::types::*;
+
+// ── GATT helpers ──────────────────────────────────────────────────────────────
+
+// The adapter session is `Bluetooth::shared()`: one per process, cloned by
+// every caller. It has to be shared, because a `GuardianDevice` is only usable
+// through the session that found it and the TUI scans with one
+// `GuardianClient` and connects with another.
+//
+// The `Uuid` constants in `crate::protocol` are passed to webbluetooth as they
+// are, without conversion, through its `uuid` feature.
+
+/// Every service the client reaches: the vendor service, Device Information
+/// and Battery.
+const GUARDIAN_SERVICES: [Uuid; 3] = [GUARDIAN_SERVICE, DEVICE_INFO_SERVICE, BATTERY_SERVICE];
+
+/// What a device request asks for: Guardian earbuds by name, plus access to
+/// the services their characteristics live under.
+///
+/// The services are named even though the filter matches on the name, because
+/// a Web Bluetooth grant covers exactly the services a request lists and
+/// `get_primary_service` refuses everything else.
+fn request_options(name_prefix: &str) -> Result<RequestDeviceOptions> {
+    Ok(RequestDeviceOptions::new()
+        .filter(DeviceFilter::new().name_prefix(name_prefix))
+        .optional_services(GUARDIAN_SERVICES)?)
+}
+
+/// What a scan reports: advertisements from anything named like a Guardian.
+///
+/// A scan grants nothing, so there is no service to name here — only what
+/// should be reported.
+fn scan_options(name_prefix: &str) -> LeScanOptions {
+    LeScanOptions::new().filter(DeviceFilter::new().name_prefix(name_prefix))
+}
+
+/// What adopting a scanned device grants: the three Guardian services, and no
+/// manufacturer data.
+fn guardian_grant() -> Result<Grant> {
+    Ok(Grant::new().services(GUARDIAN_SERVICES)?)
+}
+
+/// The MAC as the earbud reports it on [`DEVICE_ID_CHARACTERISTIC`]:
+/// `"AA:BB:CC:DD:EE:FF"` plus a one-character terminator, which is dropped
+/// before the colons become dashes.
+fn parse_device_id(bytes: &[u8]) -> String {
+    let raw = String::from_utf8_lossy(bytes);
+    let mut chars = raw.chars();
+    chars.next_back();
+    chars.as_str().replace(':', "-")
+}
+
+/// Pick one characteristic out of a device's discovered set.
+fn find_char(chars: &[RemoteGattCharacteristic], uuid: Uuid) -> Result<RemoteGattCharacteristic> {
+    let want = BluetoothUuid::from(uuid);
+    chars
+        .iter()
+        .find(|c| *c.uuid() == want)
+        .cloned()
+        .ok_or_else(|| anyhow!("Characteristic {uuid} not found"))
+}
+
+/// Read a characteristic as a UTF-8 string, logging rather than failing when
+/// it is missing or unreadable — device info is informational.
+async fn read_string(chars: &[RemoteGattCharacteristic], uuid: Uuid, what: &str) -> String {
+    let result = match find_char(chars, uuid) {
+        Ok(c) => c.read_value().await.map_err(anyhow::Error::from),
+        Err(e) => Err(e),
+    };
+    match result {
+        Ok(bytes) => {
+            let value = String::from_utf8_lossy(&bytes).to_string();
+            info!("{what}: {value}");
+            value
+        }
+        Err(e) => {
+            warn!("Could not read {what}: {e}");
+            String::new()
+        }
+    }
+}
+
+/// Subscribe to a characteristic and tag each notification with its UUID.
+///
+/// Web Bluetooth subscribes per characteristic and yields bare values, so the
+/// UUID is attached here for the dispatch loop to route on.
+async fn subscribe_tagged(
+    characteristic: &RemoteGattCharacteristic,
+    uuid: Uuid,
+) -> Result<BoxStream<'static, (Uuid, Vec<u8>)>> {
+    let notifications = characteristic.start_notifications().await?;
+    Ok(notifications.map(move |value| (uuid, value)).boxed())
+}
+
+/// Decode one impedance notification into a reading — see
+/// [`parse_impedance`](crate::parse::parse_impedance) for the wire format.
+fn impedance_reading(data: &[u8]) -> Option<ImpedanceReading> {
+    let impedance_ohms = crate::parse::parse_impedance(data)?;
+    Some(ImpedanceReading {
+        impedance_ohms,
+        impedance_kohms: impedance_ohms as f64 / 1000.0,
+        timestamp: now_ms(),
+    })
+}
 
 // ── Timestamp helper ──────────────────────────────────────────────────────────
 
@@ -98,8 +207,7 @@ impl TimestampTracker {
 
     /// Return the wall-clock timestamp in ms since Unix epoch for the given packet index.
     fn get(&mut self, index: u8) -> f64 {
-        let packet_duration_ms =
-            1000.0 * (EEG_SAMPLES_PER_PACKET as f64) / EEG_SAMPLE_RATE;
+        let packet_duration_ms = 1000.0 * (EEG_SAMPLES_PER_PACKET as f64) / EEG_SAMPLE_RATE;
 
         if self.last_index.is_none() || self.last_timestamp.is_none() {
             self.last_index = Some(index);
@@ -128,14 +236,20 @@ impl TimestampTracker {
 // ── GuardianDevice ────────────────────────────────────────────────────────────
 
 /// A Guardian earbud discovered during a BLE scan.
+///
+/// Returned by [`GuardianClient::scan_all`]; pass to
+/// [`GuardianClient::connect_to`] to establish a streaming connection.
 #[derive(Clone, Debug)]
 pub struct GuardianDevice {
     /// Advertised device name (e.g. `"IGEB"` or `"IGE-ABCDEF"`).
     pub name: String,
     /// Platform BLE identifier.
+    /// • macOS / iOS — a per-host UUID the system assigns; the same earbud
+    ///   has a different one on a different machine, because Apple never
+    ///   exposes the hardware address
+    /// • elsewhere — the Bluetooth address (`AA:BB:CC:DD:EE:FF`)
     pub id: String,
-    pub(crate) peripheral: Peripheral,
-    pub(crate) adapter: Adapter,
+    pub(crate) device: BluetoothDevice,
 }
 
 // ── GuardianClientConfig ──────────────────────────────────────────────────────
@@ -185,53 +299,54 @@ impl GuardianClient {
     // ── Public: scan ─────────────────────────────────────────────────────────
 
     /// Scan for all nearby Guardian devices and return them.
+    ///
+    /// The scan runs for `config.scan_timeout_secs` seconds so that multiple
+    /// devices in range can all be discovered before the function returns.
+    ///
+    /// Every device returned has already been granted access to its services,
+    /// so [`GuardianClient::connect_to`] does not have to scan again.
     pub async fn scan_all(&self) -> Result<Vec<GuardianDevice>> {
-        let manager = Manager::new().await?;
-        let adapters = manager.adapters().await?;
-        let adapter = adapters
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("No Bluetooth adapter found"))?;
+        let bluetooth = Bluetooth::shared();
 
-        #[cfg(target_os = "macos")]
-        {
-            use btleplug::api::CentralState;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-            loop {
-                match adapter.adapter_state().await {
-                    Ok(CentralState::PoweredOn) => break,
-                    Ok(_) if tokio::time::Instant::now() >= deadline => break,
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
+        // Waits for the adapter's first state report — what the old macOS
+        // "wait for poweredOn" polling loop was doing by hand.
+        bluetooth
+            .availability()
+            .await
+            .context("Bluetooth is not usable")?;
 
         info!(
             "scan_all: scanning for {} s …",
             self.config.scan_timeout_secs
         );
-        adapter.start_scan(ScanFilter::default()).await?;
-        tokio::time::sleep(Duration::from_secs(self.config.scan_timeout_secs)).await;
-        adapter.stop_scan().await.ok();
+        let mut scan = bluetooth
+            .request_le_scan(scan_options(&self.config.name_prefix))
+            .await?;
 
-        let mut found = vec![];
-        for p in adapter.peripherals().await? {
-            if let Ok(Some(props)) = p.properties().await {
-                if let Some(name) = props.local_name {
-                    if name.starts_with(&self.config.name_prefix) {
-                        let id = p.id().to_string();
-                        info!("scan_all: found {name}  id={id}");
-                        found.push(GuardianDevice {
-                            name,
-                            id,
-                            peripheral: p,
-                            adapter: adapter.clone(),
-                        });
-                    }
+        // A scan reports advertisements, and an earbud advertises repeatedly;
+        // keyed by id, each one is kept once.
+        let mut seen: BTreeMap<String, Candidate> = BTreeMap::new();
+        let window = Duration::from_secs(self.config.scan_timeout_secs);
+        let _ = tokio::time::timeout(window, async {
+            while let Some(candidate) = scan.next().await {
+                if !seen.contains_key(&candidate.id) {
+                    info!("scan_all: found {}  id={}", candidate.label(), candidate.id);
                 }
+                seen.insert(candidate.id.clone(), candidate);
+            }
+        })
+        .await;
+        scan.stop(); // stop the radio before connecting to anything
+
+        // A scan grants nothing, so each sighting is adopted into a device
+        // with the grant it will need once connected.
+        let grant = guardian_grant()?;
+        let mut found = vec![];
+        for (id, candidate) in seen {
+            let name = candidate.label().to_owned();
+            match bluetooth.adopt_candidate(&candidate, grant.clone()).await {
+                Ok(device) => found.push(GuardianDevice { name, id, device }),
+                Err(e) => warn!("scan_all: {name} ({id}) could not be adopted: {e}"),
             }
         }
         info!("scan_all: {} device(s) found", found.len());
@@ -245,135 +360,102 @@ impl GuardianClient {
         &self,
         device: GuardianDevice,
     ) -> Result<(mpsc::Receiver<GuardianEvent>, GuardianHandle)> {
-        self.setup_peripheral(device.peripheral, device.name, device.adapter)
-            .await
+        self.setup_device(device.device, device.name).await
     }
 
     // ── Public: connect (convenience) ────────────────────────────────────────
 
     /// Scan for the first Guardian device, connect, and return the event channel.
     pub async fn connect(&self) -> Result<(mpsc::Receiver<GuardianEvent>, GuardianHandle)> {
-        let manager = Manager::new().await?;
-        let adapters = manager.adapters().await?;
-        let adapter = adapters
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow!("No Bluetooth adapter found"))?;
-
-        #[cfg(target_os = "macos")]
-        {
-            use btleplug::api::CentralState;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-            loop {
-                match adapter.adapter_state().await {
-                    Ok(CentralState::PoweredOn) => break,
-                    Ok(_) if tokio::time::Instant::now() >= deadline => break,
-                    Ok(_) => {}
-                    Err(_) => break,
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
+        let bluetooth = Bluetooth::shared();
+        bluetooth
+            .availability()
+            .await
+            .context("Bluetooth is not usable")?;
 
         info!(
             "Scanning for Guardian devices (timeout: {} s) …",
             self.config.scan_timeout_secs
         );
-        adapter.start_scan(ScanFilter::default()).await?;
-        let peripheral = self
-            .find_first(&adapter, &self.config.name_prefix, self.config.scan_timeout_secs)
-            .await?;
-        adapter.stop_scan().await.ok();
+        // `FirstMatch` returns as soon as something matching advertises, so
+        // the timeout is a deadline rather than a fixed scan window.
+        let chooser = FirstMatch::with_timeout(Duration::from_secs(self.config.scan_timeout_secs));
+        let device = bluetooth
+            .request_device_with(request_options(&self.config.name_prefix)?, &chooser)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Timed out scanning for a Guardian device after {} s: {e}",
+                    self.config.scan_timeout_secs
+                )
+            })?;
 
-        let props = peripheral.properties().await?.unwrap_or_default();
-        let device_name = props.local_name.unwrap_or_else(|| "Unknown".into());
+        let device_name = device.name().unwrap_or_else(|| device.id().to_owned());
         info!("Found device: {device_name}");
 
-        self.setup_peripheral(peripheral, device_name, adapter)
-            .await
+        self.setup_device(device, device_name).await
     }
 
-    // ── Private: setup_peripheral ─────────────────────────────────────────────
+    // ── Private: setup_device ─────────────────────────────────────────────────
 
-    async fn setup_peripheral(
+    /// Connect a device, read its info, subscribe to EEG/IMU notifications,
+    /// spawn the background tasks, and return the event channel.
+    async fn setup_device(
         &self,
-        peripheral: Peripheral,
+        device: BluetoothDevice,
         device_name: String,
-        adapter: Adapter,
     ) -> Result<(mpsc::Receiver<GuardianEvent>, GuardianHandle)> {
-        tokio::time::timeout(Duration::from_secs(10), peripheral.connect())
+        let gatt = device.gatt();
+
+        // `connect()` has no deadline of its own — it waits for the peripheral
+        // to come into range for as long as that takes — so one is imposed
+        // here.  Ten seconds is generous for a BLE connection that usually
+        // takes under two.
+        tokio::time::timeout(Duration::from_secs(10), gatt.connect())
             .await
             .map_err(|_| anyhow!("BLE connect() timed out after 10 s"))??;
 
-        #[cfg(target_os = "linux")]
-        tokio::time::sleep(Duration::from_millis(600)).await;
-
-        tokio::time::timeout(Duration::from_secs(15), peripheral.discover_services())
+        // The Guardian's characteristics span the vendor service, Device
+        // Information and Battery, so discovery covers all three.
+        let chars = tokio::time::timeout(Duration::from_secs(15), gatt.get_characteristics())
             .await
-            .map_err(|_| anyhow!("discover_services() timed out after 15 s"))??;
+            .map_err(|_| anyhow!("service discovery timed out after 15 s"))??;
         info!("Connected and services discovered: {device_name}");
 
-        let chars: BTreeSet<Characteristic> = peripheral.characteristics();
-
-        let find_char = |uuid: Uuid| -> Result<Characteristic> {
-            chars
-                .iter()
-                .find(|c| c.uuid == uuid)
-                .cloned()
-                .ok_or_else(|| anyhow!("Characteristic {uuid} not found"))
-        };
-
         // ── Read device info ──────────────────────────────────────────────────
-        let mac_address = match peripheral.read(&find_char(MAC_ID_CHARACTERISTIC)?).await {
-            Ok(bytes) => {
-                let mac = String::from_utf8_lossy(&bytes).to_string();
+        // The MAC comes from the vendor device-ID characteristic: the standard
+        // Serial Number String (`0x2A25`) is on the Web Bluetooth GATT
+        // blocklist and never readable.
+        let mac_address = match find_char(&chars, DEVICE_ID_CHARACTERISTIC) {
+            Ok(c) => c.read_value().await.map_err(anyhow::Error::from),
+            Err(e) => Err(e),
+        }
+        .map(|bytes| parse_device_id(&bytes));
+        let mac_address = match mac_address {
+            Ok(mac) => {
                 info!("Device MAC: {mac}");
-                mac.replace(':', "-")
+                mac
             }
             Err(e) => {
                 warn!("Could not read MAC address: {e}");
                 String::new()
             }
         };
-
         let firmware_version =
-            match peripheral.read(&find_char(FIRMWARE_VERSION_CHARACTERISTIC)?).await {
-                Ok(bytes) => {
-                    let fw = String::from_utf8_lossy(&bytes).to_string();
-                    info!("Firmware: {fw}");
-                    fw
-                }
-                Err(e) => {
-                    warn!("Could not read firmware version: {e}");
-                    String::new()
-                }
-            };
-
+            read_string(&chars, FIRMWARE_VERSION_CHARACTERISTIC, "firmware version").await;
         let hardware_version =
-            match peripheral.read(&find_char(HARDWARE_VERSION_CHARACTERISTIC)?).await {
-                Ok(bytes) => {
-                    let hw = String::from_utf8_lossy(&bytes).to_string();
-                    info!("Hardware: {hw}");
-                    hw
-                }
-                Err(e) => {
-                    warn!("Could not read hardware version: {e}");
-                    String::new()
-                }
-            };
+            read_string(&chars, HARDWARE_VERSION_CHARACTERISTIC, "hardware version").await;
+
+        // ── Find characteristics ─────────────────────────────────────────────
+        let eeg_char = find_char(&chars, EEG_IMU_CHARACTERISTIC)?;
+        // Impedance is subscribed when impedance streaming is started.
+        let impedance_char = find_char(&chars, IMPEDANCE_CHARACTERISTIC)?;
+        let config_char = find_char(&chars, CONFIG_CHARACTERISTIC)?;
+        let command_char = find_char(&chars, COMMAND_CHARACTERISTIC)?;
+        let battery_char = find_char(&chars, BATTERY_CHARACTERISTIC).ok();
 
         // ── Subscribe to EEG/IMU notifications ───────────────────────────────
-        let eeg_char = find_char(EEG_IMU_CHARACTERISTIC)?;
-        peripheral.subscribe(&eeg_char).await?;
-
-        // ── Subscribe to impedance notifications ─────────────────────────────
-        let impedance_char = find_char(IMPEDANCE_CHARACTERISTIC)?;
-        // Don't subscribe yet — impedance streaming is started explicitly.
-
-        // ── Find config and command characteristics ──────────────────────────
-        let config_char = find_char(CONFIG_CHARACTERISTIC)?;
-        let command_char = find_char(COMMAND_CHARACTERISTIC)?;
+        let mut notifications = subscribe_tagged(&eeg_char, EEG_IMU_CHARACTERISTIC).await?;
 
         // ── Event channel ─────────────────────────────────────────────────────
         let (tx, rx) = mpsc::channel::<GuardianEvent>(256);
@@ -387,12 +469,14 @@ impl GuardianClient {
             .await;
 
         // ── Read battery ──────────────────────────────────────────────────────
-        if let Ok(batt_char) = find_char(BATTERY_CHARACTERISTIC) {
-            match peripheral.read(&batt_char).await {
+        if let Some(batt_char) = &battery_char {
+            match batt_char.read_value().await {
                 Ok(bytes) if !bytes.is_empty() => {
                     let level = bytes[0];
                     info!("Battery: {level}%");
-                    let _ = tx.send(GuardianEvent::Battery(BatteryReading { level })).await;
+                    let _ = tx
+                        .send(GuardianEvent::Battery(BatteryReading { level }))
+                        .await;
                 }
                 _ => {
                     warn!("Could not read battery level");
@@ -401,37 +485,27 @@ impl GuardianClient {
         }
 
         // ── Disconnect watcher ──────────────────────────────────────────────
+        // Fires when the BLE link drops (earbud powered off, out of range,
+        // and so on) — often sooner than the notification stream closes.
         let disconnect_tx = tx.clone();
-        let peripheral_id = peripheral.id();
+        let device_id = device.id().to_owned();
+        let mut disconnects = device.watch_disconnect();
         tokio::spawn(async move {
-            match adapter.events().await {
-                Ok(mut events) => {
-                    while let Some(event) = events.next().await {
-                        if let CentralEvent::DeviceDisconnected(id) = event {
-                            if id == peripheral_id {
-                                info!("Disconnect watcher: device disconnected.");
-                                let _ = disconnect_tx.send(GuardianEvent::Disconnected).await;
-                                break;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("Disconnect watcher: could not subscribe to adapter events: {e}");
-                }
+            if disconnects.next().await.is_some() {
+                info!("Disconnect watcher: device {device_id} disconnected.");
+                let _ = disconnect_tx.send(GuardianEvent::Disconnected).await;
             }
         });
 
         // ── Battery polling task (every 60 s) ─────────────────────────────
-        if let Ok(batt_char) = find_char(BATTERY_CHARACTERISTIC) {
-            let batt_peripheral = peripheral.clone();
+        if let Some(batt_char) = battery_char.clone() {
             let batt_tx = tx.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(60));
                 interval.tick().await; // skip first (we already read at connect)
                 loop {
                     interval.tick().await;
-                    match batt_peripheral.read(&batt_char).await {
+                    match batt_char.read_value().await {
                         Ok(bytes) if !bytes.is_empty() => {
                             let level = bytes[0];
                             debug!("Battery poll: {level}%");
@@ -451,30 +525,21 @@ impl GuardianClient {
         }
 
         // ── Notification dispatch task ───────────────────────────────────────
-        let peripheral_clone = peripheral.clone();
+        let notif_tx = tx.clone();
         tokio::spawn(async move {
-            let mut notifications = match peripheral_clone.notifications().await {
-                Ok(n) => n,
-                Err(e) => {
-                    warn!("Could not get notifications stream: {e}");
-                    return;
-                }
-            };
             info!("Notification stream subscribed, waiting for data…");
+            let tx = notif_tx;
 
             let mut ts_tracker = TimestampTracker::new();
             let mut notif_count: u64 = 0;
 
-            while let Some(notif) = notifications.next().await {
-                let data = &notif.value;
-                let uuid = notif.uuid;
+            // Ends when the device disconnects (webbluetooth ≥ 0.0.4).
+            while let Some((uuid, data)) = notifications.next().await {
+                let data = &data[..];
                 notif_count += 1;
 
-                if notif_count <= 5 || notif_count % 500 == 0 {
-                    debug!(
-                        "Notification #{notif_count} uuid={uuid} len={}",
-                        data.len()
-                    );
+                if notif_count <= 5 || notif_count.is_multiple_of(500) {
+                    debug!("Notification #{notif_count} uuid={uuid} len={}", data.len());
                 }
 
                 if uuid == EEG_IMU_CHARACTERISTIC {
@@ -526,27 +591,6 @@ impl GuardianClient {
                     continue;
                 }
 
-                if uuid == IMPEDANCE_CHARACTERISTIC {
-                    let impedance_ohms = if data.len() >= 4 {
-                        u32::from_le_bytes([data[0], data[1], data[2], data[3]])
-                    } else if data.len() >= 2 {
-                        u16::from_le_bytes([data[0], data[1]]) as u32
-                    } else if !data.is_empty() {
-                        data[0] as u32
-                    } else {
-                        continue;
-                    };
-                    let impedance_kohms = impedance_ohms as f64 / 1000.0;
-                    let _ = tx
-                        .send(GuardianEvent::Impedance(ImpedanceReading {
-                            impedance_ohms,
-                            impedance_kohms,
-                            timestamp: now_ms(),
-                        }))
-                        .await;
-                    continue;
-                }
-
                 debug!("Unknown notification from {uuid}");
             }
 
@@ -556,47 +600,18 @@ impl GuardianClient {
         });
 
         let handle = GuardianHandle {
-            peripheral,
+            gatt,
             config_char,
             command_char,
             impedance_char,
+            battery_char,
+            impedance_task: Mutex::new(None),
+            tx,
             mac_address,
             mains_freq_60hz: self.config.mains_freq_60hz,
         };
 
         Ok((rx, handle))
-    }
-
-    // ── Private: find_first ───────────────────────────────────────────────────
-
-    async fn find_first(
-        &self,
-        adapter: &Adapter,
-        prefix: &str,
-        timeout_secs: u64,
-    ) -> Result<Peripheral> {
-        use tokio::time::{sleep, timeout};
-
-        let result = timeout(Duration::from_secs(timeout_secs), async {
-            loop {
-                let peripherals = adapter.peripherals().await.unwrap_or_default();
-                for p in peripherals {
-                    if let Ok(Some(props)) = p.properties().await {
-                        if let Some(name) = &props.local_name {
-                            if name.starts_with(prefix) {
-                                return p;
-                            }
-                        }
-                    }
-                }
-                sleep(Duration::from_millis(250)).await;
-            }
-        })
-        .await;
-
-        result.map_err(|_| {
-            anyhow!("Timed out scanning for a Guardian device after {timeout_secs} s")
-        })
     }
 }
 
@@ -604,11 +619,20 @@ impl GuardianClient {
 
 /// A handle to an active Guardian connection for sending commands.
 pub struct GuardianHandle {
-    peripheral: Peripheral,
-    config_char: Characteristic,
-    command_char: Characteristic,
-    impedance_char: Characteristic,
-    /// Device MAC address (format: "AA-BB-CC-DD-EE-FF").
+    gatt: RemoteGattServer,
+    config_char: RemoteGattCharacteristic,
+    command_char: RemoteGattCharacteristic,
+    impedance_char: RemoteGattCharacteristic,
+    battery_char: Option<RemoteGattCharacteristic>,
+    /// Forwards impedance notifications while impedance streaming is on.
+    /// Web Bluetooth subscribes per characteristic, so impedance gets its own
+    /// stream, started and stopped with the measurement; aborting the task
+    /// drops the stream, which is what ends the subscription.
+    impedance_task: Mutex<Option<JoinHandle<()>>>,
+    /// The connection's event channel, for the impedance forwarder.
+    tx: mpsc::Sender<GuardianEvent>,
+    /// Device MAC address (format: "AA-BB-CC-DD-EE-FF"). Empty if it could
+    /// not be read.
     pub mac_address: String,
     mains_freq_60hz: bool,
 }
@@ -617,8 +641,8 @@ impl GuardianHandle {
     /// Start EEG/IMU recording on the earbud.
     pub async fn start_recording(&self) -> Result<()> {
         info!("Sending start measurement command");
-        self.peripheral
-            .write(&self.command_char, CMD_START_MEASUREMENT, WriteType::WithoutResponse)
+        self.command_char
+            .write_value_without_response(CMD_START_MEASUREMENT)
             .await?;
         Ok(())
     }
@@ -626,8 +650,8 @@ impl GuardianHandle {
     /// Stop EEG/IMU recording on the earbud.
     pub async fn stop_recording(&self) -> Result<()> {
         info!("Sending stop measurement command");
-        self.peripheral
-            .write(&self.command_char, CMD_STOP_MEASUREMENT, WriteType::WithoutResponse)
+        self.command_char
+            .write_value_without_response(CMD_STOP_MEASUREMENT)
             .await?;
         Ok(())
     }
@@ -638,21 +662,36 @@ impl GuardianHandle {
     /// configures the notch filter, then sends the start impedance command.
     pub async fn start_impedance(&self) -> Result<()> {
         info!("Starting impedance streaming");
-        self.peripheral.subscribe(&self.impedance_char).await?;
+        {
+            let mut task = self.impedance_task.lock().await;
+            if task.is_none() {
+                let mut notifications = self.impedance_char.start_notifications().await?;
+                let tx = self.tx.clone();
+                *task = Some(tokio::spawn(async move {
+                    while let Some(data) = notifications.next().await {
+                        if let Some(reading) = impedance_reading(&data) {
+                            if tx.send(GuardianEvent::Impedance(reading)).await.is_err() {
+                                break; // channel closed
+                            }
+                        }
+                    }
+                }));
+            }
+        }
 
         let notch_cfg = if self.mains_freq_60hz {
             CFG_NOTCH_60HZ
         } else {
             CFG_NOTCH_50HZ
         };
-        self.peripheral
-            .write(&self.config_char, notch_cfg, WriteType::WithoutResponse)
+        self.config_char
+            .write_value_without_response(notch_cfg)
             .await?;
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        self.peripheral
-            .write(&self.command_char, CMD_START_IMPEDANCE, WriteType::WithoutResponse)
+        self.command_char
+            .write_value_without_response(CMD_START_IMPEDANCE)
             .await?;
         Ok(())
     }
@@ -660,49 +699,65 @@ impl GuardianHandle {
     /// Stop impedance streaming.
     pub async fn stop_impedance(&self) -> Result<()> {
         info!("Stopping impedance streaming");
-        self.peripheral
-            .write(&self.command_char, CMD_STOP_IMPEDANCE, WriteType::WithoutResponse)
+        self.command_char
+            .write_value_without_response(CMD_STOP_IMPEDANCE)
             .await?;
         tokio::time::sleep(Duration::from_millis(500)).await;
-        self.peripheral.unsubscribe(&self.impedance_char).await?;
+        if let Some(task) = self.impedance_task.lock().await.take() {
+            task.abort();
+        }
         Ok(())
     }
 
     /// Turn the LED off (useful during long recordings).
     pub async fn led_off(&self) -> Result<()> {
-        self.peripheral
-            .write(&self.config_char, CFG_LED_OFF, WriteType::WithoutResponse)
+        self.config_char
+            .write_value_without_response(CFG_LED_OFF)
             .await?;
         Ok(())
     }
 
     /// Turn the LED on.
     pub async fn led_on(&self) -> Result<()> {
-        self.peripheral
-            .write(&self.config_char, CFG_LED_ON, WriteType::WithoutResponse)
+        self.config_char
+            .write_value_without_response(CFG_LED_ON)
             .await?;
         Ok(())
     }
 
     /// Read the current battery level.
     pub async fn read_battery(&self) -> Result<u8> {
-        let chars: BTreeSet<Characteristic> = self.peripheral.characteristics();
-        let batt_char = chars
-            .iter()
-            .find(|c| c.uuid == BATTERY_CHARACTERISTIC)
+        let batt_char = self
+            .battery_char
+            .as_ref()
             .ok_or_else(|| anyhow!("Battery characteristic not found"))?;
-        let data = self.peripheral.read(batt_char).await?;
+        let data = batt_char.read_value().await?;
         Ok(if data.is_empty() { 0 } else { data[0] })
     }
 
     /// Check if the peripheral is still connected.
     pub async fn is_connected(&self) -> bool {
-        self.peripheral.is_connected().await.unwrap_or(false)
+        self.gatt.connected()
     }
 
     /// Gracefully disconnect.
     pub async fn disconnect(&self) -> Result<()> {
-        self.peripheral.disconnect().await?;
+        self.gatt.disconnect();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_device_id;
+
+    #[test]
+    fn device_id_drops_terminator_and_dashes_colons() {
+        assert_eq!(parse_device_id(b"AA:BB:CC:DD:EE:FF\0"), "AA-BB-CC-DD-EE-FF");
+    }
+
+    #[test]
+    fn device_id_empty_is_empty() {
+        assert_eq!(parse_device_id(b""), "");
     }
 }

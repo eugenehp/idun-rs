@@ -304,7 +304,7 @@ async fn main() -> Result<()> {
                                 source = DecodeSource::Local;
                             } else {
                                 local_fail_count += 1;
-                                if local_fail_count <= 3 || local_fail_count % 100 == 0 {
+                                if local_fail_count <= 3 || local_fail_count.is_multiple_of(100) {
                                     warn!(
                                         "[DECODE] Local decode failed (#{local_fail_count}): \
                                          {} samples, looks invalid",
@@ -363,7 +363,7 @@ async fn main() -> Result<()> {
 
                     if let Some(ref samps) = samples {
                         // We have decoded samples (local)
-                        if eeg_count <= 10 || eeg_count % 100 == 0 {
+                        if eeg_count <= 10 || eeg_count.is_multiple_of(100) {
                             let first = samps.first().copied().unwrap_or(f64::NAN);
                             let rms = (samps.iter().map(|v| v * v).sum::<f64>()
                                 / samps.len() as f64)
@@ -391,7 +391,7 @@ async fn main() -> Result<()> {
                         }
                     } else {
                         // No local samples — either sent to cloud or raw only
-                        if eeg_count <= 10 || eeg_count % 100 == 0 {
+                        if eeg_count <= 10 || eeg_count.is_multiple_of(100) {
                             println!(
                                 "[EEG] idx={:3}  ts={:.0} ms  len={} bytes  \
                                  src={source_label}  (pkt #{})",
@@ -428,7 +428,7 @@ async fn main() -> Result<()> {
                     }
                 } else {
                     // No decoding at all — raw mode
-                    if eeg_count <= 10 || eeg_count % 100 == 0 {
+                    if eeg_count <= 10 || eeg_count.is_multiple_of(100) {
                         println!(
                             "[EEG] idx={:3}  ts={:.0} ms  len={} bytes  (pkt #{})",
                             reading.index,
@@ -460,7 +460,7 @@ async fn main() -> Result<()> {
                 }
             }
             GuardianEvent::Accelerometer(r) => {
-                if eeg_count <= 5 || eeg_count % 200 == 0 {
+                if eeg_count <= 5 || eeg_count.is_multiple_of(200) {
                     println!(
                         "[ACCEL] idx={:3}  x={:+.5}g  y={:+.5}g  z={:+.5}g",
                         r.index, r.sample.x, r.sample.y, r.sample.z,
@@ -468,7 +468,7 @@ async fn main() -> Result<()> {
                 }
             }
             GuardianEvent::Gyroscope(r) => {
-                if eeg_count <= 5 || eeg_count % 200 == 0 {
+                if eeg_count <= 5 || eeg_count.is_multiple_of(200) {
                     println!(
                         "[GYRO]  idx={:3}  x={:+.3}°/s  y={:+.3}°/s  z={:+.3}°/s",
                         r.index, r.sample.x, r.sample.y, r.sample.z,
